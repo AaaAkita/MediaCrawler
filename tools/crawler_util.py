@@ -153,13 +153,16 @@ def convert_str_cookie_to_dict(cookie_str: str) -> Dict:
         cookie = cookie.strip()
         if not cookie:
             continue
-        cookie_list = cookie.split("=")
-        if len(cookie_list) != 2:
+        if "=" not in cookie:
             continue
-        cookie_value = cookie_list[1]
+        # Keep value intact when it contains "="
+        cookie_name, cookie_value = cookie.split("=", 1)
+        cookie_name = cookie_name.strip()
+        if not cookie_name:
+            continue
         if isinstance(cookie_value, list):
             cookie_value = "".join(cookie_value)
-        cookie_dict[cookie_list[0]] = cookie_value
+        cookie_dict[cookie_name] = cookie_value
     return cookie_dict
 
 
