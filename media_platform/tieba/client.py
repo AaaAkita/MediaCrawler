@@ -37,6 +37,13 @@ from .help import TieBaExtractor
 
 
 class BaiduTieBaClient(AbstractApiClient):
+    _ANTI_CRAWLER_MARKERS = (
+        "seccaptcha.baidu.com",
+        "tb_pc_search_res_acs",
+        "verint/load",
+        "安全验证",
+        "验证码",
+    )
 
     def __init__(
         self,
@@ -280,15 +287,58 @@ class BaiduTieBaClient(AbstractApiClient):
         utils.logger.info(f"[BaiduTieBaClient.get_notes_by_keyword] Accessing search page: {full_url}")
 
         try:
-            # Use Playwright to access search page
-            await self.playwright_page.goto(full_url, wait_until="domcontentloaded")
+            multsearch_payload: Optional[Dict[str, Any]] = None
+            main_response_status: Optional[int] = None
+            navigated = False
+            try:
+                timeout_ms = max(8000, config.CRAWLER_MAX_SLEEP_SEC * 1000 + 5000)
+                async with self.playwright_page.expect_response(
+                    lambda response: "/mo/q/search/multsearch" in response.url and response.status == 200,
+                    timeout=timeout_ms,
+                ) as response_info:
+                    page_response = await self.playwright_page.goto(full_url, wait_until="domcontentloaded")
+                    if page_response:
+                        main_response_status = page_response.status
+                    navigated = True
+                multsearch_response = await response_info.value
+                multsearch_payload = await multsearch_response.json()
+                utils.logger.info(
+                    f"[BaiduTieBaClient.get_notes_by_keyword] Captured multsearch response: {multsearch_response.url}"
+                )
+            except Exception as resp_error:
+                utils.logger.warning(
+                    f"[BaiduTieBaClient.get_notes_by_keyword] Failed to capture multsearch response, fallback to DOM parse: {resp_error}"
+                )
+                if not navigated:
+                    page_response = await self.playwright_page.goto(full_url, wait_until="domcontentloaded")
+                    if page_response:
+                        main_response_status = page_response.status
 
             # Wait for page loading, using delay setting from config file
             await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
 
+            if main_response_status is not None and main_response_status >= 400:
+                raise RuntimeError(
+                    f"Tieba search blocked by anti-crawler (HTTP {main_response_status})"
+                )
+
+            if multsearch_payload:
+                notes = self._page_extractor.extract_search_note_list_from_multsearch(
+                    multsearch_payload, keyword=keyword
+                )
+                if notes:
+                    utils.logger.info(
+                        f"[BaiduTieBaClient.get_notes_by_keyword] Extracted {len(notes)} posts from multsearch payload"
+                    )
+                    return notes
+
             # Get page HTML content
             page_content = await self.playwright_page.content()
             utils.logger.info(f"[BaiduTieBaClient.get_notes_by_keyword] Successfully retrieved search page HTML, length: {len(page_content)}")
+
+            lower_content = page_content.lower()
+            if any(marker.lower() in lower_content for marker in self._ANTI_CRAWLER_MARKERS):
+                raise RuntimeError("Tieba search blocked by anti-crawler captcha page")
 
             # Extract search results
             notes = self._page_extractor.extract_search_note_list(page_content)

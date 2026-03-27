@@ -198,9 +198,12 @@ class TieBaCrawler(AbstractCrawler):
 
                     page += 1
                 except Exception as ex:
+                    err_msg = str(ex).lower()
                     utils.logger.error(
                         f"[BaiduTieBaCrawler.search] Search keywords error, current page: {page}, current keyword: {keyword}, err: {ex}"
                     )
+                    if any(marker in err_msg for marker in ("anti-crawler", "captcha", "verification", "403", "blocked")):
+                        raise
                     break
 
     async def get_specified_tieba_notes(self):

@@ -21,10 +21,12 @@
 import os
 import asyncio
 import socket
+import ipaddress
 import httpx
 import signal
 import atexit
 from typing import Optional, Dict, Any
+from urllib.parse import urlparse, urlunparse
 from playwright.async_api import Browser, BrowserContext, Playwright
 
 import config
@@ -105,6 +107,18 @@ class CDPBrowserManager:
         Launch browser and connect via CDP
         """
         try:
+            external_cdp_endpoint = os.getenv("CHROME_CDP_ENDPOINT", "").strip()
+            if external_cdp_endpoint:
+                utils.logger.info(
+                    f"[CDPBrowserManager] Using external CDP endpoint from env: {external_cdp_endpoint}"
+                )
+                await self._connect_via_external_cdp(playwright, external_cdp_endpoint)
+                browser_context = await self._create_browser_context(
+                    playwright_proxy, user_agent
+                )
+                self.browser_context = browser_context
+                return browser_context
+
             # 1. Detect browser path
             browser_path = await self._get_browser_path()
 
@@ -132,6 +146,63 @@ class CDPBrowserManager:
             utils.logger.error(f"[CDPBrowserManager] CDP browser launch failed: {e}")
             await self.cleanup()
             raise
+
+    @staticmethod
+    def _build_cdp_endpoint_candidates(endpoint: str) -> list[str]:
+        candidates = [endpoint.rstrip("/")]
+        try:
+            parsed = urlparse(endpoint)
+            host = parsed.hostname
+            if not host:
+                return candidates
+
+            try:
+                ipaddress.ip_address(host)
+                is_ip = True
+            except ValueError:
+                is_ip = False
+
+            if is_ip or host in {"localhost", "127.0.0.1", "::1"}:
+                return candidates
+
+            resolved_ip = socket.gethostbyname(host)
+            if not resolved_ip:
+                return candidates
+
+            netloc = f"{resolved_ip}:{parsed.port}" if parsed.port else resolved_ip
+            ip_endpoint = urlunparse(parsed._replace(netloc=netloc)).rstrip("/")
+            if ip_endpoint not in candidates:
+                candidates = [ip_endpoint, *candidates]
+        except Exception:
+            pass
+
+        return candidates
+
+    async def _connect_via_external_cdp(self, playwright: Playwright, endpoint: str):
+        last_error: Optional[Exception] = None
+        candidates = self._build_cdp_endpoint_candidates(endpoint)
+
+        for candidate in candidates:
+            try:
+                utils.logger.info(
+                    f"[CDPBrowserManager] Trying external CDP endpoint: {candidate}"
+                )
+                self.browser = await playwright.chromium.connect_over_cdp(candidate)
+                if self.browser and self.browser.is_connected():
+                    utils.logger.info(
+                        f"[CDPBrowserManager] Connected to external CDP endpoint: {candidate}"
+                    )
+                    return
+                raise RuntimeError("CDP connection established but browser is not connected")
+            except Exception as e:
+                last_error = e
+                utils.logger.warning(
+                    f"[CDPBrowserManager] External CDP connect failed for {candidate}: {e}"
+                )
+
+        raise RuntimeError(
+            f"Failed to connect external CDP endpoint: {endpoint}, candidates={candidates}, last_error={last_error}"
+        )
 
     async def _get_browser_path(self) -> str:
         """

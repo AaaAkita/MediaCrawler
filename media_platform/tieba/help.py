@@ -22,8 +22,9 @@
 import html
 import json
 import re
-from typing import Dict, List, Tuple
-from urllib.parse import parse_qs, unquote
+from datetime import datetime
+from typing import Any, Dict, List, Set, Tuple
+from urllib.parse import parse_qs, quote, unquote
 
 from parsel import Selector
 
@@ -38,6 +39,114 @@ GENDER_FEMALE = "sex_female"
 class TieBaExtractor:
     def __init__(self):
         pass
+
+    @staticmethod
+    def _to_int(value: Any, default: int = 0) -> int:
+        try:
+            if value is None or value == "":
+                return default
+            return int(float(value))
+        except Exception:
+            return default
+
+    @staticmethod
+    def _format_publish_time(value: Any) -> str:
+        if value is None or value == "":
+            return ""
+        if isinstance(value, (int, float)):
+            ts = float(value)
+            if ts > 1e11:
+                ts = ts / 1000.0
+            return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+        text = str(value).strip()
+        if text.isdigit():
+            ts = float(text)
+            if ts > 1e11:
+                ts = ts / 1000.0
+            return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+        return text
+
+    @staticmethod
+    def _collect_multsearch_threads(obj: Any, out: List[Dict[str, Any]]) -> None:
+        if isinstance(obj, dict):
+            # Tieba multsearch thread records usually contain tid and title/content.
+            if "tid" in obj and ("title" in obj or "content" in obj):
+                out.append(obj)
+            for value in obj.values():
+                TieBaExtractor._collect_multsearch_threads(value, out)
+            return
+        if isinstance(obj, list):
+            for value in obj:
+                TieBaExtractor._collect_multsearch_threads(value, out)
+
+    @staticmethod
+    def extract_search_note_list_from_multsearch(
+        payload: Dict[str, Any], keyword: str = ""
+    ) -> List[TiebaNote]:
+        """
+        Extract thread list from Tieba `mo/q/search/multsearch` response payload.
+        """
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
+            return []
+
+        candidates: List[Dict[str, Any]] = []
+        TieBaExtractor._collect_multsearch_threads(data, candidates)
+        if not candidates:
+            return []
+
+        results: List[TiebaNote] = []
+        seen_tids: Set[str] = set()
+        for item in candidates:
+            tid = str(item.get("tid") or item.get("thread_id") or "").strip()
+            if not tid or tid in seen_tids:
+                continue
+
+            title = str(item.get("title") or "").strip()
+            desc = str(item.get("content") or "").strip()
+            if not title and not desc:
+                continue
+
+            user = item.get("user") if isinstance(item.get("user"), dict) else {}
+            user_id = user.get("user_id")
+            user_link = f"{const.TIEBA_URL}/home/main?id={user_id}" if user_id else ""
+            user_nickname = str(user.get("show_nickname") or user.get("user_name") or "").strip()
+            user_avatar = str(user.get("portrait") or user.get("portraith") or "").strip()
+
+            tieba_name = str(
+                item.get("forum_name")
+                or item.get("forum")
+                or item.get("fname")
+                or keyword
+                or "tieba"
+            ).strip()
+            tieba_link = f"{const.TIEBA_URL}/f?kw={quote(tieba_name)}" if tieba_name else const.TIEBA_URL
+
+            publish_time = TieBaExtractor._format_publish_time(
+                item.get("create_time") or item.get("time") or item.get("modified_time")
+            )
+            total_replay_num = TieBaExtractor._to_int(
+                item.get("post_num") or item.get("reply_num") or item.get("comment_num")
+            )
+
+            note = TiebaNote(
+                note_id=tid,
+                title=title,
+                desc=desc,
+                note_url=f"{const.TIEBA_URL}/p/{tid}",
+                publish_time=publish_time,
+                user_link=user_link,
+                user_nickname=user_nickname,
+                user_avatar=user_avatar,
+                tieba_name=tieba_name,
+                tieba_link=tieba_link,
+                total_replay_num=total_replay_num,
+                source_keyword=keyword,
+            )
+            results.append(note)
+            seen_tids.add(tid)
+
+        return results
 
     @staticmethod
     def extract_search_note_list(page_content: str) -> List[TiebaNote]:
@@ -136,8 +245,8 @@ class TieBaExtractor:
                              default='').strip(), tieba_link=const.TIEBA_URL + content_selector.xpath(
                 "//a[@class='card_title_fname']/@href").get(default=''), ip_location=ip_location,
                          publish_time=publish_time,
-                         total_replay_num=thread_num_infos[0].xpath("./text()").get(default='').strip(),
-                         total_replay_page=thread_num_infos[1].xpath("./text()").get(default='').strip(), )
+                         total_replay_num=thread_num_infos[0].xpath("./text()").get(default='').strip() if len(thread_num_infos) > 0 else '0',
+                         total_replay_page=thread_num_infos[1].xpath("./text()").get(default='').strip() if len(thread_num_infos) > 1 else '1', )
         note.title = note.title.replace(f"【{note.tieba_name}】_Baidu Tieba", "")
         return note
 
