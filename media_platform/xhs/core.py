@@ -177,9 +177,12 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     # Sleep after each page navigation
                     await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
                     utils.logger.info(f"[XiaoHongShuCrawler.search] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after page {page-1}")
-                except DataFetchError:
-                    utils.logger.error("[XiaoHongShuCrawler.search] Get note detail error")
-                    break
+                except DataFetchError as ex:
+                    utils.logger.error(f"[XiaoHongShuCrawler.search] Get note detail error: {ex}, continuing with available results")
+                    continue
+                except Exception as ex:
+                    utils.logger.error(f"[XiaoHongShuCrawler.search] Unexpected error: {ex}, continuing with available results")
+                    continue
 
     async def get_creators_and_notes(self) -> None:
         """Get creator's notes and retrieve their comment information."""
