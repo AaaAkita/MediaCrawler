@@ -206,7 +206,7 @@ class ZhiHuClient(AbstractApiClient, ProxyRefreshMixin):
         """
         uri = "/api/v4/search_v3"
         params = {
-            "gk_version": "gz-gaokao",
+            "gpt_version": "2.1.0",
             "t": "general",
             "q": keyword,
             "correction": 1,
