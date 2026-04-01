@@ -92,8 +92,14 @@ class WeiboClient(ProxyRefreshMixin):
 
         ok_code = data.get("ok")
         if ok_code == 0:  # response error
+            msg = data.get("msg", "")
+            # 特殊处理：搜索结果结束不是错误
+            if "这里还没有内容" in msg or "no more content" in msg.lower():
+                utils.logger.info(f"[WeiboClient.request] No more search results: {msg}")
+                return {"cards": []}  # 返回空列表，让爬虫正常结束
+            # 其他情况才是真实错误
             utils.logger.error(f"[WeiboClient.request] request {method}:{url} err, res:{data}")
-            raise DataFetchError(data.get("msg", "response error"))
+            raise DataFetchError(msg)
         elif ok_code != 1:  # unknown error
             utils.logger.error(f"[WeiboClient.request] request {method}:{url} err, res:{data}")
             raise DataFetchError(data.get("msg", "unknown error"))
