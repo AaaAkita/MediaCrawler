@@ -21,18 +21,26 @@ import csv
 import json
 import os
 import pathlib
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 import aiofiles
 import config
 from tools.utils import utils
 from tools.words import AsyncWordCloudGenerator
 
 class AsyncFileWriter:
+    # Redis 旁路写入：惰性单例，所有 AsyncFileWriter 实例共享
+    _redis_client: Optional[Any] = None  # 实际类型: redis.Redis（惰性 import，避免子进程缺包报错）
+    _redis_init_attempted: bool = False
+
     def __init__(self, platform: str, crawler_type: str):
         self.lock = asyncio.Lock()
         self.platform = platform
         self.crawler_type = crawler_type
         self.wordcloud_generator = AsyncWordCloudGenerator() if config.ENABLE_GET_WORDCLOUD else None
+        # 读取环境变量：如果 MC_REDIS_QUEUE_KEY 存在，启用 Redis 旁路写入
+        self._redis_queue_key = os.environ.get("MC_REDIS_QUEUE_KEY", "")
+        if self._redis_queue_key and not AsyncFileWriter._redis_init_attempted:
+            self._init_redis()
 
     def _get_file_path(self, file_type: str, item_type: str) -> str:
         if config.SAVE_DATA_PATH:
@@ -53,11 +61,39 @@ class AsyncFileWriter:
                     await writer.writeheader()
                 await writer.writerow(item)
 
+    @classmethod
+    def _init_redis(cls):
+        """惰性初始化 Redis 客户端（同步版，子进程内使用）。"""
+        cls._redis_init_attempted = True
+        redis_url = os.environ.get("REDIS_URL", "")
+        if not redis_url:
+            utils.logger.warning("[AsyncFileWriter] MC_REDIS_QUEUE_KEY set but REDIS_URL missing, Redis sidecar disabled.")
+            return
+        try:
+            import redis as sync_redis
+            cls._redis_client = sync_redis.from_url(
+                redis_url, encoding="utf-8", decode_responses=True,
+                socket_connect_timeout=3, socket_timeout=3,
+            )
+            cls._redis_client.ping()
+            utils.logger.info("[AsyncFileWriter] Redis sidecar connected successfully.")
+        except Exception as exc:
+            utils.logger.warning(f"[AsyncFileWriter] Redis sidecar init failed: {exc}. Will write to JSONL only.")
+            cls._redis_client = None
+
     async def write_to_jsonl(self, item: Dict, item_type: str):
         file_path = self._get_file_path('jsonl', item_type)
+        json_line = json.dumps(item, ensure_ascii=False)
         async with self.lock:
             async with aiofiles.open(file_path, 'a', encoding='utf-8') as f:
-                await f.write(json.dumps(item, ensure_ascii=False) + '\n')
+                await f.write(json_line + '\n')
+
+        # ── Redis 旁路写入（仅对 contents 类型） ──
+        if self._redis_queue_key and item_type == "contents" and AsyncFileWriter._redis_client:
+            try:
+                AsyncFileWriter._redis_client.rpush(self._redis_queue_key, json_line)
+            except Exception as exc:
+                utils.logger.warning(f"[AsyncFileWriter] Redis rpush failed: {exc}")
 
     async def write_single_item_to_json(self, item: Dict, item_type: str):
         file_path = self._get_file_path('json', item_type)
